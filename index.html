@@ -154,7 +154,7 @@ h1,h2{margin:0;font-weight:800;letter-spacing:-.02em;text-wrap:balance}
 
   <section id="over" class="layer" hidden>
     <div class="panel">
-      <div class="eyebrow">Run over</div>
+      <div class="eyebrow" id="overTag">Run over</div>
       <div class="big" id="finalScore">0</div>
       <div class="split">
         <div>Distance<b id="finalDist">0 m</b></div>
@@ -536,7 +536,7 @@ function musicTick(){
   var bpm = 108 + Math.max(0, speed - 14) * 1.1, sd = 60 / bpm / 4;
   while (music.next < ac.currentTime + 0.2) { playStep(music.step, music.next, sd); music.next += sd; music.step++; }
 }
-function startMusic(){
+function startSynthMusic(){
   if (!soundOn || !ensureAc() || music.timer) return;
   music.step = 0; music.next = ac.currentTime + 0.06;
   musicBus.gain.cancelScheduledValues(ac.currentTime);
@@ -544,37 +544,90 @@ function startMusic(){
   musicBus.gain.exponentialRampToValueAtTime(0.5, ac.currentTime + 0.4);
   music.timer = setInterval(musicTick, 50);
 }
-function stopMusic(){
+function stopSynthMusic(){
   if (music.timer) { clearInterval(music.timer); music.timer = null; }
   if (ac && musicBus) { musicBus.gain.cancelScheduledValues(ac.currentTime); musicBus.gain.setValueAtTime(musicBus.gain.value, ac.currentTime); musicBus.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.15); }
 }
 
 /* sound effects */
-function sfxFail(){
+function synthFail(){
   if (!soundOn || !ensureAc()) return;
   var t = ac.currentTime, notes = [311, 294, 277, 262], i;
   tone(130, t, 0.3, 'sine', 0.6, master, 40);
   for (i = 0; i < 3; i++) tone(notes[i], t + 0.08 + i * 0.3, 0.3, 'sawtooth', 0.1, master, notes[i] * 0.96);
   tone(notes[3], t + 0.98, 0.9, 'sawtooth', 0.11, master, notes[3] * 0.7);
 }
-function sfxWin(){
+function synthWin(){
   if (!soundOn || !ensureAc()) return;
   var t = ac.currentTime, seq = [72, 76, 79, 84, 88, 91], i;
   for (i = 0; i < seq.length; i++) tone(mtof(seq[i]), t + i * 0.1, 0.22, 'triangle', 0.16, master);
   [72, 76, 79, 84].forEach(function(m){ tone(mtof(m + 12), t + 0.62, 0.9, 'square', 0.045, master); tone(mtof(m), t + 0.62, 0.9, 'triangle', 0.12, master); });
   for (i = 0; i < 8; i++) tone(mtof(96 + (i % 4) * 2), t + 0.7 + i * 0.07, 0.12, 'sine', 0.05, master);
 }
-function sfxCoinTier(level){
+function synthCoinTier(level){
   if (!soundOn || !ensureAc()) return;
   var t = ac.currentTime, seq = [76, 79, 83, 88, 91], n = Math.min(seq.length, 2 + level), i;
   for (i = 0; i < n; i++) tone(mtof(seq[i]), t + i * 0.07, 0.18, 'triangle', 0.14, master);
 }
-function sfxMilestone(){
+function synthMilestone(){
   if (!soundOn || !ensureAc()) return;
   var t = ac.currentTime;
   tone(mtof(79), t, 0.16, 'triangle', 0.13, master);
   tone(mtof(86), t + 0.1, 0.3, 'triangle', 0.13, master);
 }
+
+/* real audio files in /audio. HTMLAudio keeps working where WebAudio is muted (for example iPhones on silent).
+   If a file cannot load or play, the synthesized version above plays instead. */
+var FILES = { music: 'audio/music.wav', fail: 'audio/fail.wav', win: 'audio/win.wav', cheer1: 'audio/cheer1.wav', cheer2: 'audio/cheer2.wav',
+              cheer3: 'audio/cheer3.wav', milestone: 'audio/milestone.wav', coin: 'audio/coin.wav', jump: 'audio/jump.wav' };
+var musicEl = null, pool = {}, audioUnlocked = false, musicFileOK = true, musicWanted = false;
+function mkAudio(src){ var a = new Audio(); a.preload = 'auto'; a.src = src; return a; }
+try {
+  Object.keys(FILES).forEach(function(k){
+    if (k === 'music') { musicEl = mkAudio(FILES[k]); musicEl.loop = true; musicEl.volume = 0.6; musicEl.addEventListener('error', function(){ musicFileOK = false; if (musicWanted && soundOn) startSynthMusic(); }); }
+    else { pool[k] = [mkAudio(FILES[k]), mkAudio(FILES[k])]; pool[k].i = 0; }
+  });
+} catch(e){ musicEl = null; pool = {}; }
+function unlockAudio(){
+  if (audioUnlocked) return;
+  audioUnlocked = true; ensureAc();
+  Object.keys(pool).forEach(function(k){ pool[k].forEach(function(a){
+    try { a.muted = true; var p = a.play(); if (p && p.then) p.then(function(){ a.pause(); a.currentTime = 0; a.muted = false; }, function(){ a.muted = false; }); else a.muted = false; } catch(e){ a.muted = false; }
+  }); });
+}
+['pointerdown', 'keydown', 'touchend', 'click'].forEach(function(ev){ window.addEventListener(ev, unlockAudio, { passive: true }); });
+function playSfx(name, fallback){
+  if (!soundOn) return;
+  var arr = pool[name];
+  if (!arr) { if (fallback) fallback(); return; }
+  var a = arr[arr.i++ % arr.length];
+  if (a.error) { if (fallback) fallback(); return; }
+  try { a.currentTime = 0; var p = a.play(); if (p && p.catch) p.catch(function(){ if (fallback) fallback(); }); } catch(e){ if (fallback) fallback(); }
+}
+function startMusic(){
+  musicWanted = true;
+  if (!soundOn) return;
+  if (musicEl && musicFileOK && !musicEl.error) {
+    try { musicEl.currentTime = 0; musicEl.playbackRate = 1; var p = musicEl.play(); if (p && p.catch) p.catch(function(){ musicFileOK = false; if (musicWanted && soundOn) startSynthMusic(); }); return; } catch(e){ musicFileOK = false; }
+  }
+  startSynthMusic();
+}
+function stopMusic(){
+  musicWanted = false;
+  try { if (musicEl) musicEl.pause(); } catch(e){}
+  stopSynthMusic();
+}
+function setMusicSpeed(){
+  if (!musicEl) return;
+  var r = Math.min(1.3, 1 + Math.max(0, speed - 14) / 20 * 0.3);
+  if (Math.abs(musicEl.playbackRate - r) > 0.01) musicEl.playbackRate = r;
+}
+function sfxFail(){ playSfx('fail', synthFail); }
+function sfxWin(){ playSfx('win', synthWin); }
+function sfxMilestone(){ playSfx('milestone', synthMilestone); }
+function sfxCoinTier(level){ playSfx('cheer' + level, function(){ synthCoinTier(level); }); }
+function sfxCoin(n){ playSfx('coin', function(){ beep(900 + (n % 12) * 30, 0.08, 'triangle', 0.05); }); }
+function sfxJump(){ playSfx('jump', function(){ beep(700, 0.1, 'square', 0.03); }); }
 
 /* toast text on the game view */
 var toastTimer = null;
@@ -595,7 +648,7 @@ function onCoin(n){
     say(msg + ' ' + n + ' coins');
     sfxCoinTier(n >= 25 ? 3 : (n >= 10 ? 2 : 1));
   } else {
-    beep(900 + (n % 12) * 30, 0.08, 'triangle', 0.05);
+    sfxCoin(n);
   }
 }
 
@@ -661,7 +714,6 @@ function setMode(m){
 function startRun(){
   resetRun();
   setMode('play');
-  beep(520, 0.12, 'triangle', 0.05);
   startMusic();
 }
 
@@ -671,10 +723,11 @@ function die(){
   mode = 'over';
   shake = 0.45;
   stopMusic();
-  sfxFail();
-  var sc = score(), d = Math.floor(dist / 3), isBest = sc > best;
+  var sc = score(), d = Math.floor(dist / 3), isBest = sc > best, beatOld = best > 0 && sc > best;
   if (isBest) { best = sc; store.set(bestKey(), String(best)); }
-  if (isBest && sc > 0) setTimeout(sfxWin, 1100);
+  if (beatOld) sfxWin(); else sfxFail();
+  var FUNNY = ['Ha ha! Mind the goat!', 'The market got you!', 'Oga, watch your front!', 'Too slow, trader!', 'Na so? Try again!'];
+  $('#overTag').textContent = beatOld ? 'New best! You too much!' : FUNNY[Math.floor(Math.random() * FUNNY.length)];
   $('#finalScore').textContent = sc;
   $('#finalDist').textContent = d + ' m';
   $('#finalCoins').textContent = coins;
@@ -700,12 +753,12 @@ function die(){
 
 function jump(){
   if (mode !== 'play' || py > 0.001) return;
-  vy = 9.2; beep(700, 0.1, 'square', 0.03);
+  vy = 9.2; sfxJump();
 }
 function moveLane(d){
   if (mode !== 'play') return;
   var n = Math.max(0, Math.min(2, lane + d));
-  if (n !== lane) { lane = n; beep(380, 0.05, 'triangle', 0.03); }
+  if (n !== lane) lane = n;
 }
 
 function moveScenery(v, dt){
@@ -716,6 +769,7 @@ function moveScenery(v, dt){
 
 function stepPlay(dt){
   speed = Math.min(34, speed + dt * 0.45);
+  setMusicSpeed();
   dist += speed * dt;
   px += (LANES[lane] - px) * (1 - Math.exp(-14 * dt));
   vy -= 26 * dt; py += vy * dt;
@@ -910,7 +964,7 @@ $('#snd').addEventListener('click', function(){
   soundOn = !soundOn;
   $('#snd').setAttribute('aria-pressed', String(soundOn));
   $('#sndWave').style.display = soundOn ? '' : 'none';
-  if (!soundOn) stopMusic(); else if (mode === 'play') startMusic();
+  if (!soundOn) { stopMusic(); musicWanted = false; } else if (mode === 'play') startMusic();
 });
 
 window.addEventListener('keydown', function(e){
@@ -925,8 +979,12 @@ window.addEventListener('keydown', function(e){
 });
 /* picking up changes made on start.ng while this tab was in the background */
 document.addEventListener('visibilitychange', function(){
-  if (document.hidden) { if (ac && ac.state === 'running') ac.suspend(); }
-  else { if (ac && ac.state === 'suspended' && soundOn) ac.resume(); if (mode === 'menu') refreshPlayer(); }
+  if (document.hidden) { try { if (musicEl) musicEl.pause(); } catch(e){} if (ac && ac.state === 'running') ac.suspend(); }
+  else {
+    if (ac && ac.state === 'suspended' && soundOn) ac.resume();
+    if (mode === 'play' && soundOn && musicWanted && musicEl && musicFileOK) { try { musicEl.play(); } catch(e){} }
+    if (mode === 'menu') refreshPlayer();
+  }
 });
 
 function press(id, fn){ $(id).addEventListener('pointerdown', function(e){ e.preventDefault(); fn(); }); }
@@ -945,7 +1003,7 @@ $('#app').addEventListener('touchend', function(e){
 window.marketRun = {
   previewStyle: function(s, name){ previewing = true; showPlayer({ id: 'preview', name: name || 'Preview', account: '', style: normStyle(s), face: '', guest: true }); },
   start: function(){ startRun(); },
-  _test: { onCoin: function(n){ onCoin(n); }, say: say, audio: function(){ return { state: ac && ac.state, playing: !!music.timer, step: music.step }; }, win: sfxWin, fail: sfxFail }
+  _test: { onCoin: function(n){ onCoin(n); }, say: say, audio: function(){ return { file: !!(musicEl && !musicEl.paused), t: musicEl ? musicEl.currentTime : 0, dur: musicEl ? musicEl.duration : 0, rate: musicEl ? musicEl.playbackRate : 0, err: musicEl && musicEl.error ? musicEl.error.code : 0, synth: !!music.timer, sfx: Object.keys(pool).map(function(k){ return k + ':' + pool[k][0].readyState; }).join(' ') }; }, win: sfxWin, fail: sfxFail }
 };
 
 /* boot */
