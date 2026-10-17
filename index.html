@@ -86,6 +86,13 @@ h1,h2{margin:0;font-weight:800;letter-spacing:-.02em;text-wrap:balance}
 .btns{display:flex;gap:10px;flex-wrap:wrap}
 .btns .btn{flex:1;min-width:130px}
 
+/* Toast: coin encouragement, new best, invite messages */
+#toast{position:absolute;left:50%;top:26%;transform:translateX(-50%);width:max-content;max-width:88%;text-align:center;font-weight:800;font-size:clamp(22px,5vw,38px);letter-spacing:-.01em;color:var(--gold);text-shadow:0 3px 14px rgba(0,0,0,.8);pointer-events:none;opacity:0;z-index:5;text-wrap:balance}
+#toast.show{animation:pop 1.7s ease-out forwards}
+@keyframes pop{0%{opacity:0;transform:translateX(-50%) scale(.7)}12%{opacity:1;transform:translateX(-50%) scale(1.08)}22%{transform:translateX(-50%) scale(1)}80%{opacity:1}100%{opacity:0;transform:translateX(-50%) translateY(-18px)}}
+@keyframes fade{0%{opacity:0}10%{opacity:1}80%{opacity:1}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){#toast.show{animation:fade 1.7s forwards}}
+
 /* Touch pad */
 #pad{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;pointer-events:none}
 #pad button{pointer-events:auto;width:74px;height:74px;border-radius:18px;border:1px solid rgba(255,255,255,.25);background:rgba(10,15,36,.5);color:var(--fg);font-size:26px;touch-action:manipulation}
@@ -97,6 +104,8 @@ h1,h2{margin:0;font-weight:800;letter-spacing:-.02em;text-wrap:balance}
 <body>
 <div id="app">
   <canvas id="gl" aria-label="Onithsa Market Run game view"></canvas>
+
+  <div id="toast" role="status" aria-live="polite"></div>
 
   <section id="menu" class="layer">
     <div class="panel">
@@ -110,6 +119,7 @@ h1,h2{margin:0;font-weight:800;letter-spacing:-.02em;text-wrap:balance}
         <button class="btn ghost small" id="refresh" type="button">Refresh look</button>
       </div>
       <p class="note" id="menuNote">Your runner is drawn from your start.ng character.</p>
+      <div><button class="btn ghost small" id="invite" type="button">Invite friends</button></div>
       <div class="board" id="boardWrap" hidden>
         <div class="eyebrow">Top runners</div>
         <ol id="board"></ol>
@@ -154,6 +164,7 @@ h1,h2{margin:0;font-weight:800;letter-spacing:-.02em;text-wrap:balance}
       <div id="saveMsg" class="eyebrow" style="color:var(--gold)" hidden></div>
       <div class="btns">
         <button class="btn" id="again" type="button">Run again</button>
+        <button class="btn ghost" id="inviteOver" type="button">Invite a friend</button>
         <button class="btn ghost" id="menuBtn" type="button">Menu</button>
       </div>
     </div>
@@ -459,18 +470,133 @@ function applyStyle(s){
   H.pack.visible = (s.accessory === 'backpack');
 }
 
-/* ---------- audio ---------- */
-var ac = null, soundOn = true;
-function beep(freq, dur, type, vol){
-  if (!soundOn) return;
+/* ---------- audio: everything is synthesized, no sound files ---------- */
+var ac = null, soundOn = true, master = null, musicBus = null, noiseBuf = null;
+function ensureAc(){
+  if (ac) { if (ac.state === 'suspended') { try { ac.resume(); } catch(e){} } return ac; }
   try {
-    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
-    var o = ac.createOscillator(), g = ac.createGain();
-    o.type = type || 'square'; o.frequency.value = freq; g.gain.value = vol || 0.04;
-    o.connect(g); g.connect(ac.destination); o.start();
-    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
-    o.stop(ac.currentTime + dur);
-  } catch(e){}
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    master = ac.createGain(); master.gain.value = 0.9; master.connect(ac.destination);
+    musicBus = ac.createGain(); musicBus.gain.value = 0.5; musicBus.connect(master);
+    var len = Math.floor(ac.sampleRate * 0.5), buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    noiseBuf = buf;
+  } catch(e){ ac = null; }
+  return ac;
+}
+function mtof(m){ return 440 * Math.pow(2, (m - 69) / 12); }
+function tone(freq, t, dur, type, vol, dest, slideTo){
+  var o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(dest || master);
+  o.start(t); o.stop(t + dur + 0.03);
+}
+function noise(t, dur, vol, hp, dest){
+  var s = ac.createBufferSource(); s.buffer = noiseBuf;
+  var f = ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp;
+  var g = ac.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(dest || master);
+  s.start(t); s.stop(t + dur + 0.03);
+}
+function beep(freq, dur, type, vol){
+  if (!soundOn || !ensureAc()) return;
+  tone(freq, ac.currentTime, dur, type, vol || 0.04);
+}
+
+/* background music: an afrobeat-style groove in A minor that speeds up as you run faster */
+var music = { timer: null, step: 0, next: 0 };
+var SC = [0, 3, 5, 7, 10, 12];                         /* A minor pentatonic */
+var BASS = [45, 41, 48, 43];                           /* A F C G */
+var PAD = [[57, 60, 64], [53, 57, 60], [60, 64, 67], [55, 59, 62]];
+var PH = [
+  [3,-1,2,-1, 1,-1,2,3, -1,-1,0,-1, 1,2,-1,-1],
+  [4,-1,3,-1, 2,-1,1,-1, 2,3,-1,5, 4,-1,-1,-1],
+  [3,-1,2,-1, 1,-1,2,3, -1,-1,0,-1, 1,2,-1,-1],
+  [5,-1,4,-1, 3,-1,2,-1, 3,4,-1,2, 1,-1,0,-1]
+];
+function playStep(n, t, sd){
+  var bar = Math.floor(n / 16) % 4, s = n % 16, i, idx;
+  if (s % 4 === 0) tone(150, t, 0.16, 'sine', 0.55, musicBus, 45);
+  if (s === 10) tone(140, t, 0.12, 'sine', 0.3, musicBus, 45);
+  if (s === 4 || s === 12) noise(t, 0.13, 0.28, 1500, musicBus);
+  if (s % 2 === 0) noise(t, 0.04, 0.09, 7000, musicBus);
+  if (s === 6 || s === 14) noise(t, 0.11, 0.13, 6000, musicBus);
+  if (s === 0 || s === 3 || s === 6 || s === 8 || s === 10 || s === 14) tone(mtof(BASS[bar]), t, sd * 1.8, 'triangle', 0.4, musicBus);
+  if (s === 0) for (i = 0; i < 3; i++) tone(mtof(PAD[bar][i]), t, sd * 15, 'triangle', 0.06, musicBus);
+  idx = PH[bar][s];
+  if (idx >= 0) tone(mtof(69 + SC[idx]), t, sd * 1.7, 'square', 0.04, musicBus);
+}
+function musicTick(){
+  if (!ac) return;
+  var bpm = 108 + Math.max(0, speed - 14) * 1.1, sd = 60 / bpm / 4;
+  while (music.next < ac.currentTime + 0.2) { playStep(music.step, music.next, sd); music.next += sd; music.step++; }
+}
+function startMusic(){
+  if (!soundOn || !ensureAc() || music.timer) return;
+  music.step = 0; music.next = ac.currentTime + 0.06;
+  musicBus.gain.cancelScheduledValues(ac.currentTime);
+  musicBus.gain.setValueAtTime(0.0001, ac.currentTime);
+  musicBus.gain.exponentialRampToValueAtTime(0.5, ac.currentTime + 0.4);
+  music.timer = setInterval(musicTick, 50);
+}
+function stopMusic(){
+  if (music.timer) { clearInterval(music.timer); music.timer = null; }
+  if (ac && musicBus) { musicBus.gain.cancelScheduledValues(ac.currentTime); musicBus.gain.setValueAtTime(musicBus.gain.value, ac.currentTime); musicBus.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.15); }
+}
+
+/* sound effects */
+function sfxFail(){
+  if (!soundOn || !ensureAc()) return;
+  var t = ac.currentTime, notes = [311, 294, 277, 262], i;
+  tone(130, t, 0.3, 'sine', 0.6, master, 40);
+  for (i = 0; i < 3; i++) tone(notes[i], t + 0.08 + i * 0.3, 0.3, 'sawtooth', 0.1, master, notes[i] * 0.96);
+  tone(notes[3], t + 0.98, 0.9, 'sawtooth', 0.11, master, notes[3] * 0.7);
+}
+function sfxWin(){
+  if (!soundOn || !ensureAc()) return;
+  var t = ac.currentTime, seq = [72, 76, 79, 84, 88, 91], i;
+  for (i = 0; i < seq.length; i++) tone(mtof(seq[i]), t + i * 0.1, 0.22, 'triangle', 0.16, master);
+  [72, 76, 79, 84].forEach(function(m){ tone(mtof(m + 12), t + 0.62, 0.9, 'square', 0.045, master); tone(mtof(m), t + 0.62, 0.9, 'triangle', 0.12, master); });
+  for (i = 0; i < 8; i++) tone(mtof(96 + (i % 4) * 2), t + 0.7 + i * 0.07, 0.12, 'sine', 0.05, master);
+}
+function sfxCoinTier(level){
+  if (!soundOn || !ensureAc()) return;
+  var t = ac.currentTime, seq = [76, 79, 83, 88, 91], n = Math.min(seq.length, 2 + level), i;
+  for (i = 0; i < n; i++) tone(mtof(seq[i]), t + i * 0.07, 0.18, 'triangle', 0.14, master);
+}
+function sfxMilestone(){
+  if (!soundOn || !ensureAc()) return;
+  var t = ac.currentTime;
+  tone(mtof(79), t, 0.16, 'triangle', 0.13, master);
+  tone(mtof(86), t + 0.1, 0.3, 'triangle', 0.13, master);
+}
+
+/* toast text on the game view */
+var toastTimer = null;
+function say(msg){
+  var el = $('#toast');
+  el.textContent = msg;
+  el.classList.remove('show'); void el.offsetWidth; el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function(){ el.classList.remove('show'); }, 1800);
+}
+
+/* coin encouragement */
+var CHEER = { 5: 'Nice one!', 10: 'You are on fire!', 15: 'Market trader!', 25: 'Big baller!', 40: 'Onithsa legend!' };
+var CHEER_MORE = ['Unstoppable!', 'Keep going!', 'What a runner!', 'Money moves!', 'Too fast to catch!'];
+function onCoin(n){
+  var msg = CHEER[n] || ((n > 40 && n % 10 === 0) ? CHEER_MORE[(n / 10) % CHEER_MORE.length] : '');
+  if (msg) {
+    say(msg + ' ' + n + ' coins');
+    sfxCoinTier(n >= 25 ? 3 : (n >= 10 ? 2 : 1));
+  } else {
+    beep(900 + (n % 12) * 30, 0.08, 'triangle', 0.05);
+  }
 }
 
 /* ---------- game state ---------- */
@@ -486,7 +612,7 @@ var coinMat = new THREE.MeshLambertMaterial({ color: 0xffc83d, emissive: 0x5a3f0
 var mode = 'menu';   /* menu, play, over */
 var obstacles = [], coinList = [];
 var lane = 1, px = 0, py = 0, vy = 0, speed = 14, dist = 0, coins = 0, spawnAcc = 0;
-var tRun = 0, time = 0, shake = 0, best = 0, lastScore = -1, lastCoins = -1;
+var tRun = 0, time = 0, shake = 0, best = 0, lastScore = -1, lastCoins = -1, nextMile = 250, bestShown = false;
 
 function score(){ return Math.floor(dist / 3) + coins * 10; }
 
@@ -521,7 +647,7 @@ function spawnRow(){
 function resetRun(){
   clearWorld();
   lane = 1; px = 0; py = 0; vy = 0; speed = 14; dist = 0; coins = 0; spawnAcc = 12; shake = 0;
-  H.root.rotation.x = 0; lastScore = -1; lastCoins = -1;
+  H.root.rotation.x = 0; lastScore = -1; lastCoins = -1; nextMile = 250; bestShown = false;
 }
 
 function setMode(m){
@@ -536,6 +662,7 @@ function startRun(){
   resetRun();
   setMode('play');
   beep(520, 0.12, 'triangle', 0.05);
+  startMusic();
 }
 
 function bestKey(){ return 'sd_best_' + (player ? player.id : 'guest'); }
@@ -543,9 +670,11 @@ function bestKey(){ return 'sd_best_' + (player ? player.id : 'guest'); }
 function die(){
   mode = 'over';
   shake = 0.45;
-  beep(110, 0.35, 'sawtooth', 0.07);
+  stopMusic();
+  sfxFail();
   var sc = score(), d = Math.floor(dist / 3), isBest = sc > best;
   if (isBest) { best = sc; store.set(bestKey(), String(best)); }
+  if (isBest && sc > 0) setTimeout(sfxWin, 1100);
   $('#finalScore').textContent = sc;
   $('#finalDist').textContent = d + ' m';
   $('#finalCoins').textContent = coins;
@@ -607,7 +736,7 @@ function stepPlay(dt){
     if (c.mesh.position.z > 8) { scene.remove(c.mesh); coinList.splice(i, 1); continue; }
     if (Math.abs(c.mesh.position.z) < 0.9 && Math.abs(c.mesh.position.x - px) < 0.9 && Math.abs(c.mesh.position.y - (py + 0.9)) < 1.1) {
       scene.remove(c.mesh); coinList.splice(i, 1); coins++;
-      beep(900 + Math.min(coins, 12) * 30, 0.08, 'triangle', 0.04);
+      onCoin(coins);
     }
   }
   if (hit) die();
@@ -615,6 +744,8 @@ function stepPlay(dt){
   var sc = score();
   if (sc !== lastScore) { $('#score').textContent = sc; lastScore = sc; }
   if (coins !== lastCoins) { $('#coins').textContent = coins + (coins === 1 ? ' coin' : ' coins'); lastCoins = coins; }
+  if (best > 0 && sc > best && !bestShown) { bestShown = true; say('New best!'); sfxWin(); }
+  else if (sc >= nextMile) { nextMile += 250; sfxMilestone(); }
 }
 
 function poseHero(dt){
@@ -705,6 +836,7 @@ function showPlayer(p){
   $('#menuNote').textContent = p.guest
     ? 'Sign in to run as your own start.ng character and save your scores.'
     : 'Your runner is drawn from your start.ng character. Changed it on start.ng? Tap Refresh look.';
+  if (inviter) $('#menuNote').textContent = inviter + ' invited you to run. ' + $('#menuNote').textContent;
   $('#signin').hidden = !p.guest;
   best = parseInt(store.get(bestKey()), 10) || 0;
   $('#bestMenu').textContent = best;
@@ -726,6 +858,41 @@ function loadBoard(){
   });
 }
 
+/* invites: share a link to the game, with the sender's name so friends see who invited them */
+var inviter = '';
+try { inviter = (new URLSearchParams(location.search).get('from') || '').replace(/[\u0000-\u001f]/g, '').slice(0, 24); } catch(e){}
+function inviteUrl(){
+  var u = location.origin + location.pathname;
+  if (player && !player.guest && player.name) u += '?from=' + encodeURIComponent(player.name);
+  return u;
+}
+function copyText(text){
+  return new Promise(function(resolve, reject){
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(resolve, function(){ legacy(); }); return; }
+    legacy();
+    function legacy(){
+      var ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+      document.body.appendChild(ta); ta.select();
+      var ok = false; try { ok = document.execCommand('copy'); } catch(e){}
+      document.body.removeChild(ta);
+      if (ok) resolve(); else reject();
+    }
+  });
+}
+function invite(){
+  var url = inviteUrl(), text = 'Come run the market with me in Onithsa Market Run on start.ng';
+  if (navigator.share) {
+    navigator.share({ title: 'Onithsa Market Run', text: text, url: url }).catch(function(e){
+      if (!e || e.name !== 'AbortError') copyText(url).then(function(){ say('Invite link copied'); }, function(){ say(url); });
+    });
+    return;
+  }
+  copyText(text + ' ' + url).then(function(){ say('Invite link copied. Send it to a friend.'); }, function(){ say(url); });
+}
+$('#invite').addEventListener('click', invite);
+$('#inviteOver').addEventListener('click', invite);
+
 var previewing = false;
 function refreshPlayer(){
   return startng.whoami().then(function(p){
@@ -743,6 +910,7 @@ $('#snd').addEventListener('click', function(){
   soundOn = !soundOn;
   $('#snd').setAttribute('aria-pressed', String(soundOn));
   $('#sndWave').style.display = soundOn ? '' : 'none';
+  if (!soundOn) stopMusic(); else if (mode === 'play') startMusic();
 });
 
 window.addEventListener('keydown', function(e){
@@ -756,7 +924,10 @@ window.addEventListener('keydown', function(e){
   }
 });
 /* picking up changes made on start.ng while this tab was in the background */
-document.addEventListener('visibilitychange', function(){ if (!document.hidden && mode === 'menu') refreshPlayer(); });
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden) { if (ac && ac.state === 'running') ac.suspend(); }
+  else { if (ac && ac.state === 'suspended' && soundOn) ac.resume(); if (mode === 'menu') refreshPlayer(); }
+});
 
 function press(id, fn){ $(id).addEventListener('pointerdown', function(e){ e.preventDefault(); fn(); }); }
 press('#bL', function(){ moveLane(-1); });
@@ -773,7 +944,8 @@ $('#app').addEventListener('touchend', function(e){
 /* test hook: lets a developer preview any style without start.ng */
 window.marketRun = {
   previewStyle: function(s, name){ previewing = true; showPlayer({ id: 'preview', name: name || 'Preview', account: '', style: normStyle(s), face: '', guest: true }); },
-  start: function(){ startRun(); }
+  start: function(){ startRun(); },
+  _test: { onCoin: function(n){ onCoin(n); }, say: say, audio: function(){ return { state: ac && ac.state, playing: !!music.timer, step: music.step }; }, win: sfxWin, fail: sfxFail }
 };
 
 /* boot */

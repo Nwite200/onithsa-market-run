@@ -4,6 +4,9 @@ A three-lane night-street runner for start.ng, built with Three.js.
 Your runner is drawn from the player's start.ng character (body, colours, hair, hat, accessory).
 Scores go to the start.ng leaderboard for signed-in players.
 
+Sound is generated in code (no audio files): background music that speeds up as you run, a fail sound, a win fanfare for a new best, and cheers as you collect coins. The speaker button mutes everything.
+Invite friends: the Invite button shares a link (`?from=yourname`) so friends see who invited them.
+
 Controls: arrow keys or A/D to switch lanes, Up/W/Space to jump. On phones, swipe or use the buttons.
 
 ## Files
