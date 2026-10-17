@@ -1,0 +1,9 @@
+{
+  "leaderboard": {
+    "stats": [
+      { "key": "score", "label": "Score" },
+      { "key": "distance", "label": "Distance (m)" },
+      { "key": "coins", "label": "Coins" }
+    ]
+  }
+}
